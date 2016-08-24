@@ -1,0 +1,198 @@
+								#######################
+								#  KONFIGURASI MANGLE #
+								#######################
+=========================================================================================
+=						Menentukan kelompok IP dengan prioritas tinggi					=
+=========================================================================================
+/ip firewall address-list
+add list=prioritas-kantor address=8.8.8.8/24 comment="BPN pusat"
+
+=========================================================================================
+=						Menandai packet upload dan download global						=
+=========================================================================================
+/ip firewall mangle
+add action=mark-connection chain=forward comment="CLIENT UPLOAD - global" \
+    in-interface=ether12-LAN new-connection-mark=global-upload-conn \
+    out-interface=ether1-GLOBAL
+add action=mark-connection chain=forward in-interface=ether12-LAN \
+    new-connection-mark=global-upload-conn out-interface=ether2-DOMESTIK
+add action=mark-packet chain=forward connection-mark=global-upload-conn \
+    new-packet-mark=global-upload-pkt
+add action=mark-connection chain=forward comment="CLIENT DOWNLOAD - global" \
+    in-interface=ether1-GLOBAL new-connection-mark=global-download-conn \
+    out-interface=ether12-LAN
+add action=mark-connection chain=forward in-interface=ether2-DOMESTIK \
+    new-connection-mark=global-download-conn out-interface=ether12-LAN
+add action=mark-packet chain=forward connection-mark=global-download-conn \
+    new-packet-mark=global-download-pkt
+
+=========================================================================================
+=							Menandai packet upload kantor								=
+=========================================================================================
+/ip firewall mangle
+add action=mark-connection chain=forward comment="UL-prioritas kantor" \
+    connection-mark=global-upload-conn content=kkp.bpn.go.id \
+    new-connection-mark=kantor-upload-conn
+add action=mark-packet chain=forward connection-mark=kantor-upload-conn \
+    new-packet-mark=kantor-upload-pkt passthrough=no
+add action=mark-packet chain=forward connection-mark=global-upload-conn \
+    dst-address-list=prioritas-kantor new-packet-mark=kantor-upload-pkt \
+    passthrough=no
+
+=========================================================================================
+=				Menandai packet upload dengan prioritas yang lebih tinggi				=
+=========================================================================================
+/ip firewall mangle
+add action=mark-packet chain=forward comment=UL-prioritas connection-mark=\
+    global-upload-conn new-packet-mark=prioritas-upload-pkt passthrough=no \
+    protocol=icmp
+add action=mark-packet chain=forward connection-mark=global-upload-conn \
+    new-packet-mark=prioritas-upload-pkt passthrough=no port=53 protocol=udp
+
+=========================================================================================
+=				Menandai packet upload selain yang dikelompokkan di atas				=
+=========================================================================================
+/ip firewall mangle
+add action=mark-packet chain=forward comment=UL-regular connection-mark=\
+    global-upload-conn new-packet-mark=regular-upload-pkt passthrough=no
+
+=========================================================================================
+=								Menandai packet download kantor							=
+=========================================================================================
+/ip firewall mangle
+add action=mark-connection chain=forward comment="DL-prioritas kantor" \
+    connection-mark=global-download-conn content=kkp.bpn.go.id \
+    new-connection-mark=kantor-download-conn
+add action=mark-packet chain=forward connection-mark=kantor-download-conn \
+    new-packet-mark=kantor-download-pkt passthrough=no
+add action=mark-packet chain=forward connection-mark=global-download-conn \
+    new-packet-mark=kantor-download-pkt passthrough=no src-address-list=\
+    prioritas-kantor
+
+=========================================================================================
+=							Menandai packet download simultan							=
+=========================================================================================
+/ip firewall mangle
+add action=mark-packet chain=forward comment=DL-simultan connection-limit=\
+    6,32 connection-mark=global-download-conn new-packet-mark=\
+    simultan-download-pkt passthrough=no
+
+=========================================================================================
+=							Menandai packet download ringan								=
+=========================================================================================
+/ip firewall mangle
+add action=mark-connection chain=forward comment=\
+    "DL-Packet kecil < 1MB; throughput < 20kbps" connection-bytes=0-1000000 \
+    connection-mark=global-download-conn \
+    connection-rate=0-20k new-connection-mark=light-download-conn protocol=tcp
+add action=mark-connection chain=forward connection-bytes=0-1000000 \
+    connection-mark=global-download-conn \
+    connection-rate=0-20k new-connection-mark=light-download-conn protocol=udp
+add action=mark-packet chain=forward connection-mark=light-download-conn \
+    new-packet-mark=light-download-pkt passthrough=no
+
+=========================================================================================
+=							Menandai packet download berat								=
+=========================================================================================
+/ip firewall mangle
+add action=mark-connection chain=forward comment="DL-Packet besar > 10MB" \
+    connection-bytes=10000000-0 connection-mark=global-download-conn \
+    new-connection-mark=heavy-download-conn protocol=tcp
+add action=mark-connection chain=forward connection-bytes=10000000-0 \
+    connection-mark=global-download-conn new-connection-mark=\
+    heavy-download-conn protocol=udp
+add action=mark-packet chain=forward connection-mark=heavy-download-conn \
+    new-packet-mark=heavy-download-pkt passthrough=no
+
+=========================================================================================
+=				Menandai packet download selain yang dikelompokkan di atas				=
+=========================================================================================
+/ip firewall mangle
+add action=mark-packet chain=forward comment=DL-regular connection-mark=\
+    global-download-conn new-packet-mark=regular-download-pkt passthrough=no
+
+								#######################
+								#  KONFIGURASI QUEUE  #
+								#######################
+=========================================================================================
+=	Membuat jenis queue baru untuk software queue dan hardware queue					=
+=	dengan packet fifo dan batas masing-masing sebanyak 100 queue						=
+=========================================================================================
+/queue type
+add kind=pfifo name=packet-fifo-software pfifo-limit=100
+add kind=pfifo name=packet-fifo-hardware pfifo-limit=100
+
+=========================================================================================
+=			Menetapkan packet-fifo-hardware sebagai jenis queue untuk interface			=
+=========================================================================================
+/queue interface
+set ether1-GLOBAL queue=packet-fifo-hardware
+set ether2-DOMESTIK queue=packet-fifo-hardware
+set ether12-LAN queue=packet-fifo-hardware
+
+=========================================================================================
+=									Membuat queue tree									=
+=========================================================================================
+/queue tree
+add max-limit=1M name=aUpload packet-mark=global-upload-pkt parent=global \
+    priority=1 queue=packet-fifo-software
+add max-limit=1M name=bDownload packet-mark=global-download-pkt parent=global \
+    priority=5 queue=packet-fifo-software
+add limit-at=333k max-limit=1M name="a1.Prioritas Kantor" packet-mark=\
+    kantor-upload-pkt parent=aUpload priority=1 queue=packet-fifo-software
+add limit-at=85k max-limit=1M name=a2.Prioritas packet-mark=\
+    prioritas-upload-pkt parent=aUpload priority=4 queue=packet-fifo-software
+add limit-at=512k max-limit=1M name=a3.Regular packet-mark=regular-upload-pkt \
+    parent=aUpload priority=7 queue=packet-fifo-software
+an-download-pkt parent=bDownload \
+    priority=5 queue=packet-fifo-software
+add limit-at=142k max-limit=1M name="b1.Prioritas Kantor" packet-mark=\
+    kantor-download-pkt parent=bDownload priority=1 queue=\
+    packet-fifo-software
+add limit-at=666k max-limit=1M name=\
+    "b2.Packet Kecil < 1MB; throughput <20kbps" packet-mark=\
+    light-download-pkt parent=bDownload priority=2 queue=packet-fifo-software
+add burst-limit=930k burst-threshold=428k burst-time=15s limit-at=285k \
+    max-limit=571k name=b3.Regular packet-mark=regular-download-pkt parent=\
+    bDownload priority=4 queue=packet-fifo-software
+add burst-limit=930k burst-threshold=428k burst-time=15s max-limit=571k name=\
+    "b5.Packet Besar > 10MB" packet-mark=heavy-download-pkt parent=bDownload \
+    queue=packet-fifo-software
+add burst-limit=930k burst-threshold=428k burst-time=15s max-limit=571k name=\
+    "b4.Download Simultan" packet-mark=simultan-download-pkt parent=bDownload \
+    priority=5 queue=packet-fifo-software
+
+								#######################
+								#  KONFIGURASI FILTER #
+								#######################
+=========================================================================================
+=	Filter untuk drop koneksi berat dan simultan, posisi filter rule diletakkan paling	=
+=				atas agar dieksekusi pertama kali sebelum rule lainnya					=
+=========================================================================================
+/ip firewall filter
+add action=drop chain=forward comment="DROP HEAVY and SIMULTAN CONNECTION" \
+    disabled=yes packet-mark=simultan-download-pkt
+add action=drop chain=forward disabled=yes packet-mark=heavy-download-pkt
+
+							####################################
+							#  KONFIGURASI SCRIPT & SCHEDULER  #
+							####################################
+=========================================================================================
+=		Membuat script untuk otomatisasi proses enable dan disable filter di atas		=
+=========================================================================================
+/system script
+add name=dropheavysimultan_enable policy=ftp,read,write,test,sensitive \
+    source="/ip firewall filter enable 0,1"
+add name=dropheavysimultan_disable policy=ftp,read,write,test,sensitive \
+    source="/ip firewall filter disable 0,1"
+
+=========================================================================================
+=		17.	Membuat scheduler untuk menjalankan script di atas secara periodik			=
+=========================================================================================
+/system scheduler
+add disabled=no interval=1m name=dropheavysimultan_disable on-event=\
+    dropheavysimultan_disable policy=ftp,read,write,test,sensitive \
+    start-date=jan/02/1970 start-time=00:00:00
+add disabled=no interval=1m name=dropheavysimultan_enable on-event=\
+    dropheavysimultan_enable policy=ftp,read,write,test,sensitive start-date=\
+    jan/02/1970 start-time=00:00:30
